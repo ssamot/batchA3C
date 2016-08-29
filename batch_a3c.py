@@ -11,7 +11,7 @@ from atari_environment import AtariEnvironment
 import numpy as np
 import time
 import gym
-from model_aac import *
+from model_batcha3c import *
 from keras import backend as K
 import threading
 import math

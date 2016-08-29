@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=1 nohup python batch_a3c.py --show_training False 2>err.txt 1>out.txt &

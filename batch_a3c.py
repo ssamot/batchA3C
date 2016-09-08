@@ -25,7 +25,7 @@ flags.DEFINE_string('experiment', 'space_invaders', 'Name of the current experim
 flags.DEFINE_string('game', 'SpaceInvaders-v0',
                     'Name of the atari game to play. Full list here: https://gym.openai.com/envs#atari')
 flags.DEFINE_integer('num_concurrent', 6, 'Number of concurrent actor-learner threads to use during training.')
-flags.DEFINE_integer('tmax', 10 * 10**7, 'Number of training timesteps.')
+flags.DEFINE_integer('tmax', 80000000, 'Number of training timesteps.')
 
 
 flags.DEFINE_float('gamma', 0.99, 'Reward discount rate.')
@@ -62,6 +62,7 @@ FLAGS = flags.FLAGS
 T = 0
 TMAX = FLAGS.tmax
 START_TIME = time.time()
+R_DEPTH = 5
 
 
 
@@ -80,9 +81,10 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
     a = graph_ops["a"]
     R = graph_ops["R"]
     lr = graph_ops["learning_rate"]
+    td = graph_ops["td"]
 
     actor_update = graph_ops[get_name("update", thread_id)]
-    v_p = graph_ops[get_name("v_p", thread_id)]
+    v_p = graph_ops[get_name("values", thread_id)]
 
     copy_from_target = graph_ops[get_name("copy_from_target", thread_id)]
 
@@ -100,6 +102,11 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
     t = 0
     games_played = 0
 
+    s_batch = []
+    a_batch = []
+    reward_batch = []
+    v_batch = []
+
     while T < TMAX:
 
         # Get initial game observation
@@ -111,11 +118,6 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
         ep_t = 0
         # actions = []
         start = time.time()
-
-        s_batch = []
-        a_batch = []
-        reward_batch = []
-
 
 
         while True:
@@ -140,6 +142,7 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
 
             a_batch.append(a_t)
             s_batch.append(s_t)
+            v_batch.append(readout_v)
 
             s_t = s_t1
             T = T + 1
@@ -154,7 +157,7 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
             if T % FLAGS.checkpoint_interval == 0:
                 saver.save(session, FLAGS.checkpoint_dir + "/" + FLAGS.experiment + ".ckpt", global_step=T)
 
-            if terminal or (ep_t % 20 == 0):
+            if terminal or (ep_t % R_DEPTH == 0):
 
                 R_batch = []
 
@@ -171,17 +174,21 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
 
                 R_batch = list(reversed(R_batch))
 
+                td_batch = np.array(R_batch) - np.array(v_batch)
+
                 learning_rate = initial_learning_rate * (FLAGS.tmax - T) / FLAGS.tmax
                 learning_rate = max(learning_rate, 0)
                 #
                 session.run(actor_update, feed_dict={lr: learning_rate,
                                                      R : R_batch,
                                                      a : a_batch,
-                                                     s : s_batch})
+                                                     s : s_batch,
+                                                     td: td_batch})
 
                 s_batch = []
                 a_batch = []
                 reward_batch = []
+                v_batch = []
 
 
                 session.run(copy_from_target)
@@ -203,6 +210,9 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
                     "/ Learning Rate: ", str(initial_learning_rate * (FLAGS.tmax - T) / FLAGS.tmax), \
                     "/ Time:" + str(end - start)
 
+                with open("rewards.csv", "a") as myfile:
+                    line = "%f, %f\n"%(T,ep_reward)
+                    myfile.write(line)
 
 
                 break
@@ -216,16 +226,17 @@ def build_graph(num_actions):
     graph_ops = {}
 
     # Create shared deep q network
-    s, target_v_network, target_p_network = build_network(num_actions=num_actions, agent_history_length=FLAGS.agent_history_length,
+    s, target_network = build_network(num_actions=num_actions, agent_history_length=FLAGS.agent_history_length,
                                  resized_width=FLAGS.resized_width, resized_height=FLAGS.resized_height)
 
-    target_network_params_v = target_v_network.trainable_weights
-    target_network_params_p = target_p_network.trainable_weights
+    target_network_params_v = target_network.trainable_weights
+
 
 
 
     a = tf.placeholder("float", [None, num_actions])
     R = tf.placeholder("float", [None])
+    td = tf.placeholder("float", [None])
     graph_ops["s"] = s
     graph_ops["a"] = a
     graph_ops["R"] = R
@@ -234,37 +245,34 @@ def build_graph(num_actions):
     graph_ops["learning_rate"] = learning_rate
 
 
-    p_values = target_p_network(s)
-
-
+    p_values = target_network(s)[1]
     graph_ops["target_p"] = p_values
+    graph_ops["td"] = td
 
 
     optimizer_V = tf.train.RMSPropOptimizer(learning_rate, decay = 0.99, epsilon=0.1)
-    optimizer_P = tf.train.RMSPropOptimizer(learning_rate, decay = 0.99, epsilon=0.1)
 
     for thread_id in range(FLAGS.num_concurrent):
 
-        _, v_network, p_network = build_network(num_actions=num_actions, agent_history_length=FLAGS.agent_history_length,
+        _, per_thread_network = build_network(num_actions=num_actions, agent_history_length=FLAGS.agent_history_length,
                                  resized_width=FLAGS.resized_width, resized_height=FLAGS.resized_height)
 
-        network_params_v = v_network.trainable_weights
-        network_params_p = p_network.trainable_weights
-
-        v_values = v_network(s)
-        p_values = p_network(s)
+        network_params_v = per_thread_network.trainable_weights
 
 
-        graph_ops[get_name("v_p", thread_id)] = tf.concat(1,[v_values,p_values])
+        values = per_thread_network(s)
+        v_values = values[0]
+        p_values = values[1]
+
+
+        graph_ops[get_name("values", thread_id)] = tf.concat(1,[v_values,p_values])
 
 
 
         # Some of this code has been shamelessly stolen from
         # https://github.com/miyosuda/async_deep_reinforce
-        td = tf.sub((R), tf.transpose(v_values))
-        td = tf.squeeze(td)
 
-        v_cost =  0.5 * tf.nn.l2_loss(td)
+        v_cost =  0.5 * tf.nn.l2_loss(tf.squeeze(tf.sub((R), tf.transpose(v_values))))
         entropy_beta = 0.01
         log_p = tf.log(tf.clip_by_value(p_values, 1e-20, 1.0))
 
@@ -273,25 +281,17 @@ def build_graph(num_actions):
         actor_cost = -tf.reduce_sum( tf.reduce_sum( tf.mul( log_p, a ), reduction_indices=1 ) * td + entropy * entropy_beta )
 
 
-        gvs = optimizer_V.compute_gradients(v_cost, var_list=network_params_v)
+        gvs = optimizer_V.compute_gradients(v_cost + actor_cost, var_list=network_params_v)
         capped_gvs = [(tf.clip_by_norm(gvs[i][0], 40.0), target_network_params_v[i]) for i in range(len(gvs))]
-        x_v = optimizer_V.apply_gradients(capped_gvs)
-
-        gvs = optimizer_P.compute_gradients(actor_cost, var_list=network_params_p)
-        capped_gvs = [(tf.clip_by_norm(gvs[i][0], 40.0), target_network_params_p[i]) for i in range(len(gvs))]
-        x_p = optimizer_P.apply_gradients(capped_gvs)
+        update = optimizer_V.apply_gradients(capped_gvs)
 
 
-
-
-        update = [x_v, x_p]
 
         #graph_ops[get_name"actor_cost"] = actor_cost
         graph_ops[get_name("update", thread_id)] = update
         graph_ops[get_name("cost", thread_id)] = v_cost
 
-        copy_from_target = [network_params_v[i].assign(target_network_params_v[i]) for i in range(len(target_network_params_v))] + \
-                            [network_params_p[i].assign(target_network_params_p[i]) for i in range(len(target_network_params_p))]
+        copy_from_target = [network_params_v[i].assign(target_network_params_v[i]) for i in range(len(target_network_params_v))]
         graph_ops[get_name("copy_from_target", thread_id)] = copy_from_target
 
 
@@ -321,12 +321,12 @@ def get_num_actions():
     """
     # Figure out number of actions from gym env
     env = gym.make(FLAGS.game)
-    num_actions = env.action_space.n
-    if (FLAGS.game == "Pong-v0" or FLAGS.game == "Breakout-v0"):
-        # Gym currently specifies 6 actions for pong
-        # and breakout when only 3 are needed. This
-        # is a lame workaround.
-        num_actions = 3
+    env = AtariEnvironment(gym_env=env, resized_width=FLAGS.resized_width, resized_height=FLAGS.resized_height,
+                           agent_history_length=FLAGS.agent_history_length)
+
+    num_actions = len(env.gym_actions)
+
+
     return num_actions
 
 

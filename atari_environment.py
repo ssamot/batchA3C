@@ -21,7 +21,7 @@ class AtariEnvironment(object):
 
     """
 
-    def __init__(self, gym_env, resized_width, resized_height, agent_history_length, mode = "train", crop = True):
+    def __init__(self, gym_env, resized_width, resized_height, agent_history_length, mode = "train", crop = False):
         self.env = gym_env
         self.resized_width = resized_width
         self.resized_height = resized_height
@@ -36,6 +36,13 @@ class AtariEnvironment(object):
             # Only three are used, the rest are no-ops. This just lets us
             # pick from a simplified "LEFT", "RIGHT", "NOOP" action space.
             self.gym_actions = [1,2,3]
+
+        if ("SpaceInvaders-v0"):
+            print "Doing workaround for actions"
+            # Gym returns 6 possible actions for breakout and pong.
+            # Only three are used, the rest are no-ops. This just lets us
+            # pick from a simplified "LEFT", "RIGHT", "NOOP" action space.
+            self.gym_actions = [0,1,2,3]
 
         # Screen buffer of size AGENT_HISTORY_LENGTH to be able
         # to build state arrays of size [1, AGENT_HISTORY_LENGTH, width, height]

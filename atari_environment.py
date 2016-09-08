@@ -37,12 +37,6 @@ class AtariEnvironment(object):
             # pick from a simplified "LEFT", "RIGHT", "NOOP" action space.
             self.gym_actions = [1,2,3]
 
-        if ("SpaceInvaders-v0"):
-            print "Doing workaround for actions"
-            # Gym returns 6 possible actions for breakout and pong.
-            # Only three are used, the rest are no-ops. This just lets us
-            # pick from a simplified "LEFT", "RIGHT", "NOOP" action space.
-            self.gym_actions = [0,1,2,3]
 
         # Screen buffer of size AGENT_HISTORY_LENGTH to be able
         # to build state arrays of size [1, AGENT_HISTORY_LENGTH, width, height]

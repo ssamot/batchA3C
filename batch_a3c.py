@@ -119,7 +119,7 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
         ep_reward = 0
         episode_v = 0
         episode_ave_max_p = 0
-        hg
+        ep_t = 0
         # actions = []
         start = time.time()
 

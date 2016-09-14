@@ -24,7 +24,7 @@ flags = tf.app.flags
 flags.DEFINE_string('experiment', 'space_invaders', 'Name of the current experiment')
 flags.DEFINE_string('game', 'SpaceInvaders-v0',
                     'Name of the atari game to play. Full list here: https://gym.openai.com/envs#atari')
-flags.DEFINE_integer('num_concurrent', 6, 'Number of concurrent actor-learner threads to use during training.')
+flags.DEFINE_integer('num_concurrent', 4, 'Number of concurrent actor-learner threads to use during training.')
 flags.DEFINE_integer('tmax', 80000000, 'Number of training timesteps.')
 
 
@@ -48,21 +48,21 @@ flags.DEFINE_integer('resized_width', 84, 'Scale screen to this width.')
 flags.DEFINE_integer('resized_height', 84, 'Scale screen to this height.')
 flags.DEFINE_integer('agent_history_length', 4, 'Use this number of recent screens as the environment state.')
 
+
+
 def log_uniform(lo, hi, rate):
   log_lo = math.log(lo)
   log_hi = math.log(hi)
   v = log_lo * (1-rate) + log_hi * rate
   return math.exp(v)
 
-initial_learning_rate = log_uniform(1e-4 ,
-                                    1e-2,
-                                    0.4226)
+initial_learning_rate = 0.0001/3.0
 
 FLAGS = flags.FLAGS
 T = 0
 TMAX = FLAGS.tmax
 START_TIME = time.time()
-R_DEPTH = 5
+N_STEP = 5
 
 
 
@@ -75,14 +75,15 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
     """
     global TMAX, T, START_TIME
 
+    lr = graph_ops["learning_rate"]
+
+
 
     # Unpack graph ops
-    s = graph_ops["s"]
-    a = graph_ops["a"]
-    R = graph_ops["R"]
-    lr = graph_ops["learning_rate"]
-    td = graph_ops["td"]
-
+    s = graph_ops[get_name("s", thread_id)]
+    a = graph_ops[get_name("a", thread_id)]
+    R = graph_ops[get_name("R", thread_id)]
+    td = graph_ops[get_name("td", thread_id)]
     actor_update = graph_ops[get_name("update", thread_id)]
     v_p = graph_ops[get_name("values", thread_id)]
 
@@ -107,6 +108,9 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
     reward_batch = []
     v_batch = []
 
+
+    session.run(copy_from_target)
+
     while T < TMAX:
 
         # Get initial game observation
@@ -115,7 +119,7 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
         ep_reward = 0
         episode_v = 0
         episode_ave_max_p = 0
-        ep_t = 0
+        hg
         # actions = []
         start = time.time()
 
@@ -157,7 +161,7 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
             if T % FLAGS.checkpoint_interval == 0:
                 saver.save(session, FLAGS.checkpoint_dir + "/" + FLAGS.experiment + ".ckpt", global_step=T)
 
-            if terminal or (ep_t % R_DEPTH == 0):
+            if terminal or (ep_t % N_STEP == 0):
 
                 R_batch = []
 
@@ -171,6 +175,8 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
                 for reward in reversed(reward_batch):
                     R_t = reward + FLAGS.gamma * R_t
                     R_batch.append(R_t)
+
+                # reward + gamma * V_{t+1}
 
                 R_batch = list(reversed(R_batch))
 
@@ -232,30 +238,37 @@ def build_graph(num_actions):
     target_network_params_v = target_network.trainable_weights
 
 
-
-
-    a = tf.placeholder("float", [None, num_actions])
-    R = tf.placeholder("float", [None])
-    td = tf.placeholder("float", [None])
-    graph_ops["s"] = s
-    graph_ops["a"] = a
-    graph_ops["R"] = R
+    p_values = target_network(s)[1]
+    graph_ops["target_p"] = p_values
 
     learning_rate = tf.placeholder(tf.float32, shape=[])
     graph_ops["learning_rate"] = learning_rate
 
 
-    p_values = target_network(s)[1]
-    graph_ops["target_p"] = p_values
-    graph_ops["td"] = td
 
 
-    optimizer_V = tf.train.RMSPropOptimizer(learning_rate, decay = 0.99, epsilon=0.1)
+
+    #optimizer_V = tf.train.RMSPropOptimizer(learning_rate, decay = 0.99, epsilon=0.1,use_locking=True)
+
+    optimizer_V = tf.train.AdamOptimizer(learning_rate)
+    #optimizer_V = tf.train.MomentumOptimizer(learning_rate, momentum= 0.8)
 
     for thread_id in range(FLAGS.num_concurrent):
 
-        _, per_thread_network = build_network(num_actions=num_actions, agent_history_length=FLAGS.agent_history_length,
+        s, per_thread_network = build_network(num_actions=num_actions, agent_history_length=FLAGS.agent_history_length,
                                  resized_width=FLAGS.resized_width, resized_height=FLAGS.resized_height)
+
+
+        a = tf.placeholder("float", [None, num_actions])
+        R = tf.placeholder("float", [None])
+        td = tf.placeholder("float", [None])
+        graph_ops[get_name("s", thread_id)] = s
+        graph_ops[get_name("a", thread_id)] = a
+        graph_ops[get_name("R", thread_id)] = R
+        graph_ops[get_name("td", thread_id)] = td
+
+
+
 
         network_params_v = per_thread_network.trainable_weights
 
@@ -282,13 +295,13 @@ def build_graph(num_actions):
 
 
         gvs = optimizer_V.compute_gradients(v_cost + actor_cost, var_list=network_params_v)
-        capped_gvs = [(tf.clip_by_norm(gvs[i][0], 40.0), target_network_params_v[i]) for i in range(len(gvs))]
+        capped_gvs = [(gvs[i][0], target_network_params_v[i]) for i in range(len(gvs))]
         update = optimizer_V.apply_gradients(capped_gvs)
 
 
 
         #graph_ops[get_name"actor_cost"] = actor_cost
-        graph_ops[get_name("update", thread_id)] = update
+        graph_ops[get_name("update", thread_id)] = update, td - 0.0
         graph_ops[get_name("cost", thread_id)] = v_cost
 
         copy_from_target = [network_params_v[i].assign(target_network_params_v[i]) for i in range(len(target_network_params_v))]

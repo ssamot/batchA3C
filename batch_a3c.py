@@ -34,7 +34,7 @@ flags.DEFINE_string('checkpoint_dir', '/tmp/checkpoints', 'Directory for storing
 flags.DEFINE_integer('summary_interval', 5,
                      'Save training summary to file every n seconds (rounded '
                      'up to statistics interval.')
-flags.DEFINE_integer('checkpoint_interval', 100000,
+flags.DEFINE_integer('checkpoint_interval', 500000,
                      'Checkpoint the model (i.e. save the parameters) every n '
                      'global frames (rounded up to statistics interval.')
 flags.DEFINE_boolean('show_training', True, 'If true, have gym render evironments during training')
@@ -56,13 +56,13 @@ def log_uniform(lo, hi, rate):
   v = log_lo * (1-rate) + log_hi * rate
   return math.exp(v)
 
-initial_learning_rate = 0.0001/3.0
+initial_learning_rate = 0.0001
 
 FLAGS = flags.FLAGS
 T = 0
 TMAX = FLAGS.tmax
 START_TIME = time.time()
-N_STEP = 5
+N_STEP = 1
 
 
 
@@ -83,7 +83,6 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
     s = graph_ops[get_name("s", thread_id)]
     a = graph_ops[get_name("a", thread_id)]
     R = graph_ops[get_name("R", thread_id)]
-    td = graph_ops[get_name("td", thread_id)]
     actor_update = graph_ops[get_name("update", thread_id)]
     v_p = graph_ops[get_name("values", thread_id)]
 
@@ -106,30 +105,31 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
     s_batch = []
     a_batch = []
     reward_batch = []
-    v_batch = []
+
 
 
     session.run(copy_from_target)
+    s_t = env.get_initial_state()
+    terminal = False
+
+
+    ep_reward = 0
+    episode_v = 0
+    episode_ave_max_p = 0
+    ep_t = 0
 
     while T < TMAX:
 
         # Get initial game observation
-        s_t = env.get_initial_state()
 
-        ep_reward = 0
-        episode_v = 0
-        episode_ave_max_p = 0
-        ep_t = 0
+
         # actions = []
         start = time.time()
+        t_start = t
 
 
-        while True:
-
-
-
+        while not (terminal or ((t - t_start)  == N_STEP )):
             readout = v_p.eval(session=session, feed_dict={s: [s_t]})[0]
-
             readout_v = readout[0]
             readout_p = readout[1:]
 
@@ -140,13 +140,11 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
 
             # Gym executes action in game environment on behalf of actor-learner
             s_t1, r_t, terminal, info = env.step(action_index)
-
-            clipped_r_t = np.clip(r_t, -1, 1)  # try using sigmoid? later
-            reward_batch.append(clipped_r_t)
+            reward_batch.append(np.clip(r_t, -1, 1)  )
 
             a_batch.append(a_t)
             s_batch.append(s_t)
-            v_batch.append(readout_v)
+
 
             s_t = s_t1
             T = T + 1
@@ -161,67 +159,71 @@ def actor_learner_thread(lock, thread_id, env, session, graph_ops, num_actions, 
             if T % FLAGS.checkpoint_interval == 0:
                 saver.save(session, FLAGS.checkpoint_dir + "/" + FLAGS.experiment + ".ckpt", global_step=T)
 
-            if terminal or (ep_t % N_STEP == 0):
-
-                R_batch = []
-
-                if(terminal):
-                    R_t = 0.0
-                else:
-                    R_t = v_p.eval(session=session, feed_dict={s: [s_t1]})[0][0]
 
 
-                # The forward view of TD calculated in reverse
-                for reward in reversed(reward_batch):
-                    R_t = reward + FLAGS.gamma * R_t
-                    R_batch.append(R_t)
+        #print len(s_batch), len(reward_batch), len(v_batch)
 
-                # reward + gamma * V_{t+1}
-
-                R_batch = list(reversed(R_batch))
-
-                td_batch = np.array(R_batch) - np.array(v_batch)
-
-                learning_rate = initial_learning_rate * (FLAGS.tmax - T) / FLAGS.tmax
-                learning_rate = max(learning_rate, 0)
-                #
-                session.run(actor_update, feed_dict={lr: learning_rate,
-                                                     R : R_batch,
-                                                     a : a_batch,
-                                                     s : s_batch,
-                                                     td: td_batch})
-
-                s_batch = []
-                a_batch = []
-                reward_batch = []
-                v_batch = []
+        if(terminal):
+            R_t = 0.0
+        else:
+            R_t = v_p.eval(session=session, feed_dict={s: [s_t1]})[0][0]
 
 
-                session.run(copy_from_target)
+        # n-step updates
+        R_batch = []
+        for reward in reversed(reward_batch):
+            R_t = reward + FLAGS.gamma * R_t
+            R_batch.append(R_t)
+        R_batch = list(reversed(R_batch))
 
-            if(terminal):
-                games_played += 1
-                #stats = [ep_reward, episode_v / float(ep_t)]
-                # for i in range(len(stats)):
-                #     session.run(update_ops[i], feed_dict={summary_placeholders[i]: float(stats[i])})
-                end = time.time()
-                print "THREAD:", thread_id, \
-                    "/ TIME", T, \
-                    "/ TIMESTEP", t, \
-                    "/ REWARD", ep_reward,\
-                    "/ Q_MAX %.4f" % (episode_v / float(ep_t), ), \
-                    "/ P_MAX %.4f" % (episode_ave_max_p / float(ep_t), ), \
-                    "/ Total(Hours):" , str((end - START_TIME)/60.0/60.0),\
-                    "/ Million Steps/Hour:" , (T/((end - START_TIME)/60.0/60.0))/1000000.0,\
-                    "/ Learning Rate: ", str(initial_learning_rate * (FLAGS.tmax - T) / FLAGS.tmax), \
-                    "/ Time:" + str(end - start)
+        learning_rate = initial_learning_rate * (FLAGS.tmax - T) / FLAGS.tmax
+        learning_rate = max(learning_rate, 0)
+        #
+        session.run(actor_update, feed_dict={lr: learning_rate,
+                                             R : R_batch,
+                                             a : a_batch,
+                                             s : s_batch})
 
-                with open("rewards.csv", "a") as myfile:
-                    line = "%f, %f\n"%(T,ep_reward)
-                    myfile.write(line)
+        s_batch = []
+        a_batch = []
+        reward_batch = []
 
 
-                break
+
+        session.run(copy_from_target)
+
+        if(terminal):
+            games_played += 1
+            #stats = [ep_reward, episode_v / float(ep_t)]
+            # for i in range(len(stats)):
+            #     session.run(update_ops[i], feed_dict={summary_placeholders[i]: float(stats[i])})
+            end = time.time()
+            print "THREAD:", thread_id, \
+                "/ TIME", T, \
+                "/ TIMESTEP", t, \
+                "/ REWARD", ep_reward,\
+                "/ Q_MAX %.4f" % (episode_v / float(ep_t), ), \
+                "/ P_MAX %.4f" % (episode_ave_max_p / float(ep_t), ), \
+                "/ Total(Hours):" , str((end - START_TIME)/60.0/60.0),\
+                "/ Million Steps/Hour:" , (T/((end - START_TIME)/60.0/60.0))/1000000.0,\
+                "/ Learning Rate: ", str(initial_learning_rate * (FLAGS.tmax - T) / FLAGS.tmax), \
+                "/ Time:" + str(end - start)
+
+            with open("rewards.csv", "a") as myfile:
+                line = "%f, %f\n"%(T,ep_reward)
+                myfile.write(line)
+
+            s_t = env.get_initial_state()
+            terminal = False
+
+
+            ep_reward = 0
+            episode_v = 0
+            episode_ave_max_p = 0
+            ep_t = 0
+
+
+
 
 
 
@@ -243,14 +245,15 @@ def build_graph(num_actions):
 
     learning_rate = tf.placeholder(tf.float32, shape=[])
     graph_ops["learning_rate"] = learning_rate
+    graph_ops["s"] = s
 
 
 
 
 
-    #optimizer_V = tf.train.RMSPropOptimizer(learning_rate, decay = 0.99, epsilon=0.1,use_locking=True)
+    #optimizer_V = tf.train.RMSPropOptimizer(learning_rate, decay = 0.99, epsilon=0.1)
 
-    optimizer_V = tf.train.AdamOptimizer(learning_rate)
+    optimizer_V = tf.train.AdamOptimizer(learning_rate,epsilon=1e-4)
     #optimizer_V = tf.train.MomentumOptimizer(learning_rate, momentum= 0.8)
 
     for thread_id in range(FLAGS.num_concurrent):
@@ -261,11 +264,9 @@ def build_graph(num_actions):
 
         a = tf.placeholder("float", [None, num_actions])
         R = tf.placeholder("float", [None])
-        td = tf.placeholder("float", [None])
         graph_ops[get_name("s", thread_id)] = s
         graph_ops[get_name("a", thread_id)] = a
         graph_ops[get_name("R", thread_id)] = R
-        graph_ops[get_name("td", thread_id)] = td
 
 
 
@@ -285,23 +286,25 @@ def build_graph(num_actions):
         # Some of this code has been shamelessly stolen from
         # https://github.com/miyosuda/async_deep_reinforce
 
-        v_cost =  0.5 * tf.nn.l2_loss(tf.squeeze(tf.sub((R), tf.transpose(v_values))))
+        td = tf.sub((R), tf.squeeze(v_values))
+
+        v_cost =  tf.nn.l2_loss(td)
         entropy_beta = 0.01
         log_p = tf.log(tf.clip_by_value(p_values, 1e-20, 1.0))
 
         entropy = -tf.reduce_sum(p_values * log_p, reduction_indices=1)
 
-        actor_cost = -tf.reduce_sum( tf.reduce_sum( tf.mul( log_p, a ), reduction_indices=1 ) * td + entropy * entropy_beta )
-
-
-        gvs = optimizer_V.compute_gradients(v_cost + actor_cost, var_list=network_params_v)
-        capped_gvs = [(gvs[i][0], target_network_params_v[i]) for i in range(len(gvs))]
+        actor_cost = -tf.reduce_sum( tf.reduce_sum( tf.mul( log_p, a ), reduction_indices=1 ) * tf.stop_gradient(td) )#+ entropy * entropy_beta  )
+        cost = v_cost + actor_cost
+        #cost = tf.truediv(cost,tf.cast(tf.shape(R)[0], tf.float32))
+        gvs = optimizer_V.compute_gradients(cost, var_list=network_params_v)
+        capped_gvs = [(tf.clip_by_average_norm(gvs[i][0], 0.1), target_network_params_v[i]) for i in range(len(gvs))]
         update = optimizer_V.apply_gradients(capped_gvs)
 
 
 
         #graph_ops[get_name"actor_cost"] = actor_cost
-        graph_ops[get_name("update", thread_id)] = update, td - 0.0
+        graph_ops[get_name("update", thread_id)] = update
         graph_ops[get_name("cost", thread_id)] = v_cost
 
         copy_from_target = [network_params_v[i].assign(target_network_params_v[i]) for i in range(len(target_network_params_v))]

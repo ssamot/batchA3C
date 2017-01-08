@@ -2,6 +2,7 @@ from collections import deque
 
 import numpy as np
 import skimage.transform
+from scipy.misc import imresize
 
 #
 def rgb2gray(rgb):
@@ -43,7 +44,7 @@ class AtariEnvironment(object):
 
         # Screen buffer of size AGENT_HISTORY_LENGTH to be able
         # to build state arrays of size [1, AGENT_HISTORY_LENGTH, width, height]
-        self.state_buffer = deque()
+        self.state_buffer = deque(maxlen=4)
 
 
     def get_initial_state(self):
@@ -51,7 +52,7 @@ class AtariEnvironment(object):
         Resets the atari game, clears the state buffer
         """
         # Clear the state buffer
-        self.state_buffer = deque()
+        self.state_buffer = deque(maxlen=4)
 
         x_t = self.env.reset()
 
@@ -64,7 +65,7 @@ class AtariEnvironment(object):
         x_t = self.get_preprocessed_frame(x_t)
         s_t = np.stack((x_t, x_t, x_t, x_t), axis = 0)
 
-        for i in range(self.agent_history_length-1):
+        for i in range(self.agent_history_length):
             self.state_buffer.append(x_t)
         return s_t
 
@@ -87,7 +88,9 @@ class AtariEnvironment(object):
             #
 
         else:
-            x_t =  skimage.transform.resize(x_t, (self.resized_width, self.resized_height))
+            x_t =  np.array(imresize(x_t, (self.resized_width, self.resized_height), interp="bilinear"), dtype="float")
+
+
 
         x_t/=255.0
 
@@ -100,21 +103,13 @@ class AtariEnvironment(object):
         Pops oldest frame, adds current frame to the state buffer.
         Returns current state.
         """
-        lives_before = self.env.ale.lives()
+        #lives_before = self.env.ale.lives()
         x_t1, r_t, terminal, info = self.env.step(self.gym_actions[action_index])
-        terminal = self.env.ale.game_over() or (self.mode == 'train' and lives_before != self.env.ale.lives())
+        #terminal = self.env.ale.game_over() or (self.mode == 'train' and lives_before != self.env.ale.lives())
 
 
         x_t1 = self.get_preprocessed_frame(x_t1)
-
-        previous_frames = np.array(self.state_buffer)
-        s_t1 = np.empty((self.agent_history_length, self.resized_height, self.resized_width))
-        s_t1[:self.agent_history_length-1, ...] = previous_frames
-        s_t1[self.agent_history_length-1] = x_t1
-
-        # Pop the oldest frame, add the current frame to the queue
-        self.state_buffer.popleft()
         self.state_buffer.append(x_t1)
-
+        s_t1 = np.array(self.state_buffer)
 
         return s_t1, r_t, terminal, info
